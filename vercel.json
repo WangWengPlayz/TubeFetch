@@ -4,7 +4,7 @@
   "installCommand": "pnpm install",
   "buildCommand": "pnpm run build",
   "functions": {
-    "artifacts/api-server/api/index.ts": {
+    "api/index.ts": {
       "runtime": "@vercel/node@3.0.0",
       "maxDuration": 30
     }
@@ -12,7 +12,7 @@
   "rewrites": [
     {
       "source": "/(.*)",
-      "destination": "/artifacts/api-server/api/index.ts"
+      "destination": "/api/index.ts"
     }
   ],
   "env": {
