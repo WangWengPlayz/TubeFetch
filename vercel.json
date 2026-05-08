@@ -2,7 +2,7 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "version": 2,
   "installCommand": "pnpm install",
-  "buildCommand": "pnpm run typecheck:libs",
+  "buildCommand": "pnpm run build",
   "functions": {
     "artifacts/api-server/api/index.ts": {
       "runtime": "@vercel/node@3.0.0",
@@ -16,6 +16,7 @@
     }
   ],
   "env": {
-    "NODE_ENV": "production"
+    "NODE_ENV": "production",
+    "PORT": "3000"
   }
 }
