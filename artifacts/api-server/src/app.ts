@@ -39,7 +39,8 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Serve static files from public folder (favicon, og-image, etc.)
-app.use(express.static(path.resolve(__dirname, "../public")));
+// When built, __dirname is dist/, so we go up 2 levels to reach public/
+app.use(express.static(path.resolve(__dirname, "../../public")));
 
 // Pretty-print all JSON responses automatically (2-space indent)
 app.set("json spaces", 2);
