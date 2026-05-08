@@ -4,6 +4,7 @@
   "installCommand": "pnpm install",
   "buildCommand": "pnpm run build",
   "outputDirectory": ".",
+  "nodeVersion": "18.x",
   "functions": {
     "api/index.ts": {
       "runtime": "@vercel/node@3.0.0",
