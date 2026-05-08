@@ -1,7 +1,6 @@
 /**
  * Vercel serverless entry point.
- * Exports the Express app without calling app.listen() —
- * Vercel wraps it automatically as a serverless function.
+ * Exports the Express app — Vercel automatically wraps it as a serverless function.
  */
 import app from "../src/app";
 

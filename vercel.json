@@ -2,20 +2,22 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "version": 2,
   "installCommand": "pnpm install",
-  "buildCommand": "pnpm run typecheck:libs",
+  "buildCommand": "pnpm run build",
+  "outputDirectory": ".",
   "functions": {
-    "artifacts/api-server/api/index.ts": {
-      "runtime": "@vercel/node@3",
+    "api/index.ts": {
+      "runtime": "@vercel/node@3.0.0",
       "maxDuration": 30
     }
   },
   "rewrites": [
     {
       "source": "/(.*)",
-      "destination": "/artifacts/api-server/api/index.ts"
+      "destination": "/api/index.ts"
     }
   ],
   "env": {
-    "NODE_ENV": "production"
+    "NODE_ENV": "production",
+    "PORT": "3000"
   }
 }
