@@ -8,10 +8,12 @@ import { inferCategory } from "../lib/category";
 import { dedup, withTimeout } from "../lib/dedup";
 import { validateQuery, sanitizeError } from "../lib/validate";
 import { downloadRateLimit } from "../middleware/rate-limit";
-import { fetchDownloadLinks } from "../lib/downloader";
+import { fetchDownloadLinks, type ServerNum, type S3Quality } from "../lib/downloader";
 import { isShutdown, emitAdminLog, recordApiCall, recordServerResult } from "../lib/admin-state";
 
 const router: IRouter = Router();
+
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 interface VideoPayload {
   version: string;
@@ -25,7 +27,8 @@ interface VideoPayload {
   media: {
     mp4: { url: string; quality: "HD" } | null;
     mp3: { url: string } | null;
-    server: 1 | 2 | null;
+    server: 1 | 2 | 3 | null;
+    qualities?: S3Quality[]; // present when server === 3
   };
 }
 
@@ -35,11 +38,14 @@ interface VideoResponse extends VideoPayload {
   ms: number;
 }
 
+// ── Cache (auto-mode route only) ──────────────────────────────────────────────
 // Fresh 5 min, stale-served up to 20 min (SWR), max 500 entries.
 const cache = new TtlCache<VideoPayload>(300_000, 1_200_000, 500);
 
 // Title → videoId lookup cache (LRU, max 1000).
 const queryToId = new BoundedMap<string, string>(1_000);
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 const YT_URL_RE =
   /(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/;
@@ -83,33 +89,45 @@ function resolveThumbnail(
   return `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
 }
 
+/** Derive the server's public base URL from the request (used for Server 3 proxy URLs). */
+function proxyBaseFrom(req: Request): string {
+  return `${req.protocol}://${req.get("host")}`;
+}
+
+// ── Payload builder ───────────────────────────────────────────────────────────
+
 /**
- * Fetch and assemble the full video payload.
+ * Fetch and assemble the full v1 video payload.
  *
- * @param preInfo - Pre-loaded yts.VideoResult from a keyword search.
- *   When provided, the redundant second yts({ videoId }) lookup is skipped
- *   and only the download fetch runs — saving a full network round-trip.
- *   Pass null for URL-based requests to run yts + download in parallel.
+ * @param preInfo   - Pre-loaded yts.VideoResult from a keyword search.
+ *                    Pass null for URL-based requests (runs yts + download in parallel).
+ * @param server    - Which download server to use (default: "auto").
+ * @param proxyBase - This server's base URL; required when server === 3.
  */
 async function fetchPayload(
   videoId: string,
   youtubeUrl: string,
   preInfo: yts.VideoResult | null = null,
+  server: ServerNum = "auto",
+  proxyBase = "",
 ): Promise<VideoPayload> {
   let info: yts.VideoResult | null = preInfo;
   let links: Awaited<ReturnType<typeof fetchDownloadLinks>> | null = null;
 
   if (info) {
-    // Keyword path — metadata already in hand from the search result.
-    // Only fetch download links (no second yts call needed).
-    links = await dedup(`dl:${videoId}`, () => fetchDownloadLinks(youtubeUrl));
+    // Keyword path — metadata already in hand; only fetch download links.
+    links = await dedup(`dl:${videoId}:${server}`, () =>
+      fetchDownloadLinks(youtubeUrl, videoId, proxyBase, server),
+    );
   } else {
     // URL path — run metadata lookup and download fetch in parallel.
     const [infoResult, dlResult] = await Promise.allSettled([
       dedup(`yts-vid:${videoId}`, () =>
         withTimeout(yts({ videoId }), 15_000, "yt-search-id"),
       ),
-      dedup(`dl:${videoId}`, () => fetchDownloadLinks(youtubeUrl)),
+      dedup(`dl:${videoId}:${server}`, () =>
+        fetchDownloadLinks(youtubeUrl, videoId, proxyBase, server),
+      ),
     ]);
     info = infoResult.status === "fulfilled"
       ? (infoResult.value as unknown as yts.VideoResult)
@@ -125,22 +143,37 @@ async function fetchPayload(
     info?.description ?? "",
   );
 
+  // Server 3 provides richer metadata — merge what yt-search may have missed
+  const s3author = links?.author ?? null;
+  const s3desc   = links?.description ?? null;
+
   const rawInfo: Record<string, unknown> = {
-    title:            info?.title ?? null,
-    author:           authorName,
+    title:            info?.title ?? links?.title ?? null,
+    author:           authorName ?? s3author,
     channel_url:      channelUrl,
     thumbnail,
     duration:         info?.duration?.timestamp ?? null,
-    duration_seconds: info?.duration?.seconds ?? null,
-    views:            info?.views ?? null,
+    duration_seconds: info?.duration?.seconds ?? (links?.duration ?? null),
+    views:            info?.views ?? (links?.views ?? null),
     likes:            info?.likes ?? null,
     published:        info?.ago ?? null,
-    description:      info?.description ?? null,
+    description:      info?.description ?? s3desc,
     keywords:         info?.keywords ?? [],
   };
 
   const mp4Url = links?.mp4 ?? null;
   const mp3Url = links?.mp3 ?? null;
+
+  const media: VideoPayload["media"] = {
+    mp4: mp4Url ? { url: mp4Url, quality: "HD" } : null,
+    mp3: mp3Url ? { url: mp3Url } : null,
+    server: links?.server ?? null,
+  };
+
+  // Include quality list when Server 3 was used
+  if (links?.server === 3 && links.qualities?.length) {
+    media.qualities = links.qualities;
+  }
 
   return {
     version: VERSION,
@@ -151,18 +184,20 @@ async function fetchPayload(
     short_url: `https://youtu.be/${videoId}`,
     category,
     info: clean(rawInfo),
-    media: {
-      mp4: mp4Url ? { url: mp4Url, quality: "HD" } : null,
-      mp3: mp3Url ? { url: mp3Url } : null,
-      server: links?.server ?? null,
-    },
+    media,
   };
 }
 
-router.get("/v1/q", downloadRateLimit, async (req: Request, res: Response) => {
+// ── Shared request handler ────────────────────────────────────────────────────
+
+async function handleV1(
+  req: Request,
+  res: Response,
+  server: ServerNum,
+  useCache: boolean,
+): Promise<void> {
   const t0 = Date.now();
 
-  // ── Admin: block during maintenance shutdown ──────────────────────────────
   if (isShutdown()) {
     emitAdminLog("warn", "[v1] Request blocked — server in shutdown mode");
     res.status(503).json({
@@ -172,7 +207,6 @@ router.get("/v1/q", downloadRateLimit, async (req: Request, res: Response) => {
     return;
   }
 
-  // ── Input validation (before ApiCount — bad input is not a real request) ──
   const validation = validateQuery(req.query[""]);
   if (!validation.ok) {
     res.status(400).json({
@@ -185,7 +219,7 @@ router.get("/v1/q", downloadRateLimit, async (req: Request, res: Response) => {
       examples: [
         "/api/v1/q?=lay me down sam smith",
         "/api/v1/q?=https://youtu.be/dQw4w9WgXcQ",
-        "/api/v1/q?=https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "/api/v1/server=3/q?=https://youtu.be/dQw4w9WgXcQ",
       ],
     });
     return;
@@ -193,7 +227,6 @@ router.get("/v1/q", downloadRateLimit, async (req: Request, res: Response) => {
 
   const input = validation.value;
 
-  // ── Reject non-YouTube URLs before ApiCount (not counted, not an error) ──
   if (isUrl(input) && !extractVideoId(input)) {
     res.status(400).json({
       version: VERSION,
@@ -211,10 +244,9 @@ router.get("/v1/q", downloadRateLimit, async (req: Request, res: Response) => {
     return;
   }
 
-  // ── Count only real, processable requests ─────────────────────────────────
   const ApiCount = increment();
   recordApiCall();
-  emitAdminLog("info", `[v1] ${input.slice(0, 80)}`);
+  emitAdminLog("info", `[v1${server !== "auto" ? `/s${server}` : ""}] ${input.slice(0, 80)}`);
   res.on("finish", () => {
     if (res.statusCode >= 200 && res.statusCode < 400) recordSuccess();
     else recordError();
@@ -224,17 +256,16 @@ router.get("/v1/q", downloadRateLimit, async (req: Request, res: Response) => {
     let videoId: string | null = null;
     let youtubeUrl: string;
     let preInfo: yts.VideoResult | null = null;
+    const proxyBase = proxyBaseFrom(req);
 
     if (isUrl(input)) {
       videoId = extractVideoId(input);
       youtubeUrl = `https://www.youtube.com/watch?v=${videoId!}`;
-      // preInfo stays null — fetchPayload runs yts + download in parallel.
     } else {
       const known = queryToId.get(input);
       if (known) {
         videoId = known;
         youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
-        // preInfo stays null — metadata comes from cache or parallel fetch.
       } else {
         const searchResult = await dedup(
           `yts:${input}`,
@@ -243,11 +274,8 @@ router.get("/v1/q", downloadRateLimit, async (req: Request, res: Response) => {
         const first = searchResult.videos[0];
         if (!first) {
           res.status(404).json({
-            version: VERSION,
-            success: false,
-            creditTo: "MJL",
-            ApiCount,
-            ms: Date.now() - t0,
+            version: VERSION, success: false, creditTo: "MJL",
+            ApiCount, ms: Date.now() - t0,
             error: "No YouTube results found for this query.",
           });
           return;
@@ -255,44 +283,75 @@ router.get("/v1/q", downloadRateLimit, async (req: Request, res: Response) => {
         videoId = first.videoId;
         youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
         queryToId.set(input, videoId);
-        // Pass the search result directly — avoids a redundant yts({ videoId }) call.
         preInfo = first;
       }
     }
 
-    const hit = cache.getWithMeta(videoId!);
-    if (hit) {
-      res.setHeader("Cache-Control", "private, no-store");
-      res.json({ ...hit.value, ApiCount, cached: true, ms: Date.now() - t0 } satisfies VideoResponse);
-      if (hit.stale) {
-        setImmediate(() => {
-          dedup(`swr:${videoId}`, () => fetchPayload(videoId!, youtubeUrl, null))
-            .then(payload => cache.set(videoId!, payload))
-            .catch(() => {});
-        });
+    // Cache only used in auto mode
+    if (useCache) {
+      const hit = cache.getWithMeta(videoId!);
+      if (hit) {
+        res.setHeader("Cache-Control", "private, no-store");
+        res.json({ ...hit.value, ApiCount, cached: true, ms: Date.now() - t0 } satisfies VideoResponse);
+        if (hit.stale) {
+          setImmediate(() => {
+            dedup(`swr:${videoId}`, () => fetchPayload(videoId!, youtubeUrl, null, "auto", proxyBase))
+              .then(payload => cache.set(videoId!, payload))
+              .catch(() => {});
+          });
+        }
+        return;
       }
-      return;
     }
 
-    const payload = await dedup(`fetch:${videoId}`, () => fetchPayload(videoId!, youtubeUrl, preInfo));
-    cache.set(videoId!, payload);
+    const payload = await dedup(
+      `fetch:${videoId}:${server}`,
+      () => fetchPayload(videoId!, youtubeUrl, preInfo, server, proxyBase),
+    );
+
+    if (useCache) cache.set(videoId!, payload);
+
     res.setHeader("Cache-Control", "private, no-store");
     const srv = payload.media.server;
-    if (srv === 1 || srv === 2) recordServerResult(srv, !!(payload.media.mp4 || payload.media.mp3));
-    emitAdminLog("success", `[v1] ✓ ${videoId} server:${srv ?? "?"} ${Date.now()-t0}ms`);
+    if (srv === 1 || srv === 2 || srv === 3) {
+      recordServerResult(srv, !!(payload.media.mp4 || payload.media.mp3));
+    }
+    emitAdminLog("success", `[v1${server !== "auto" ? `/s${server}` : ""}] ✓ ${videoId} server:${srv ?? "?"} ${Date.now()-t0}ms`);
     res.json({ ...payload, ApiCount, cached: false, ms: Date.now() - t0 } satisfies VideoResponse);
   } catch (err: unknown) {
-    req.log.error({ err, input }, "YouTube download error");
+    req.log.error({ err, input }, "v1 YouTube download error");
     emitAdminLog("error", `[v1] ✗ ${sanitizeError(err)}`);
     res.status(500).json({
-      version: VERSION,
-      success: false,
-      creditTo: "MJL",
-      ApiCount,
-      ms: Date.now() - t0,
-      error: sanitizeError(err),
+      version: VERSION, success: false, creditTo: "MJL",
+      ApiCount, ms: Date.now() - t0, error: sanitizeError(err),
     });
   }
+}
+
+// ── Routes ────────────────────────────────────────────────────────────────────
+
+/** GET /api/v1/q?=<url or title>  —  auto mode (tries servers 1→2→3) */
+router.get("/v1/q", downloadRateLimit, (req, res) => handleV1(req, res, "auto", true));
+
+/** GET /api/v1/server=:server/q?=<url or title>  —  specific server */
+router.get("/v1/server=:server/q", downloadRateLimit, (req: Request, res: Response) => {
+  const raw = String(req.params.server);
+  if (raw === "auto") return handleV1(req, res, "auto", false);
+  const n = parseInt(raw, 10);
+  if (n !== 1 && n !== 2 && n !== 3) {
+    res.status(400).json({
+      version: VERSION, success: false, creditTo: "MJL",
+      error: `Invalid server "${raw}". Valid options: 1, 2, 3, auto`,
+      examples: [
+        "/api/v1/server=1/q?=never gonna give you up",
+        "/api/v1/server=2/q?=https://youtu.be/dQw4w9WgXcQ",
+        "/api/v1/server=3/q?=https://youtu.be/dQw4w9WgXcQ",
+        "/api/v1/server=auto/q?=bohemian rhapsody",
+      ],
+    });
+    return;
+  }
+  return handleV1(req, res, n as ServerNum, false);
 });
 
 export default router;

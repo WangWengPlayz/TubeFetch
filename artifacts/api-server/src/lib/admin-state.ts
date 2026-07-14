@@ -66,19 +66,20 @@ export function getMinuteBuckets(): ApiMinuteBucket[] {
 // ── Package (downloader) status tracking ──────────────────────────────────────
 type PackageStat = { lastSuccess: number; lastFailure: number };
 
-const _serverStats: { 1: PackageStat; 2: PackageStat } = {
+const _serverStats: { 1: PackageStat; 2: PackageStat; 3: PackageStat } = {
   1: { lastSuccess: 0, lastFailure: 0 },
   2: { lastSuccess: 0, lastFailure: 0 },
+  3: { lastSuccess: 0, lastFailure: 0 },
 };
 
-export function recordServerResult(server: 1 | 2, success: boolean): void {
+export function recordServerResult(server: 1 | 2 | 3, success: boolean): void {
   if (success) _serverStats[server].lastSuccess = Date.now();
   else         _serverStats[server].lastFailure = Date.now();
 }
 
 export type PackageStatus = "up" | "degraded" | "unknown";
 
-export function getServerStatus(server: 1 | 2): PackageStatus {
+export function getServerStatus(server: 1 | 2 | 3): PackageStatus {
   const s = _serverStats[server];
   if (!s.lastSuccess && !s.lastFailure) return "unknown";
   if (s.lastSuccess >= s.lastFailure)   return "up";
