@@ -6,9 +6,23 @@ const router: IRouter = Router();
 
 const CHANGELOG: { version: string; date: string; tag: string; notes: string[] }[] = [
   {
+    version: "1.3.1",
+    date: "2026-07-14",
+    tag: "current",
+    notes: [
+      "<strong>Server 3 — youtubei.js</strong>: new third download source using YouTube's native client; returns full-quality metadata alongside the standard best MP4 &amp; MP3 links",
+      "Server 3 quality list — when <code>server=3</code> is used, <code>media.qualities[]</code> is included in the response with every available stream: <code>itag</code>, <code>mimeType</code>, <code>quality</code>, <code>url</code>, <code>hasVideo</code>, <code>hasAudio</code>, <code>width</code>, <code>height</code>, <code>fps</code>, <code>bitrate</code>",
+      "Server-select routes — pin any request to a specific server: <code>/api/v1/server=1/q?=…</code>, <code>/api/v1/server=2/q?=…</code>, <code>/api/v1/server=3/q?=…</code> and the equivalent for v2 (<code>/api/v2/server=N/q?=…</code>). Both v1 and v2 share the same <code>server=</code> URL structure",
+      "Auto fallback upgraded to 1→2→3 — when Server 1 (btch) and Server 2 (nayan) both return no usable links, Server 3 is tried automatically before giving up; omit <code>server=</code> or use <code>server=auto</code> for this behaviour",
+      "Proxy endpoint — Server 3 format URLs are routed through <code>/api/proxy/{videoId}/{itag}</code> on this server (direct YouTube streaming URLs return &ldquo;Access Denied&rdquo; in browsers; the proxy adds the required session context). Supports the <code>Range</code> header for seeking and resuming downloads",
+      "<code>media.server</code> now returns <code>1 | 2 | 3 | null</code> — indicating which download server delivered the result",
+      "v1 extended with Server 3 metadata — when server 3 is used, <code>info.description</code> is also populated from YouTube's native client",
+    ],
+  },
+  {
     version: "1.3.0",
     date: "2026-06-08",
-    tag: "current-hotfix",
+    tag: "",
     notes: [
       "New secured <code>/admin</code> route — administrative console for monitoring and controlling the API server",
       "Real-time dashboard via SSE: live API stats (total calls, success, errors, uptime), Chart.js visualisations (success/error doughnut + calls-per-minute line chart), and package status for both download servers",
@@ -319,7 +333,7 @@ const FAQS: { q: string; a: string }[] = [
   },
   {
     q: "What happens if both download sources fail?",
-    a: "TubeFetch uses a two-source fallback chain. <strong>Source 1</strong> is <code>@distube/ytdl-core</code> (direct YouTube CDN, no third-party relay). <strong>Source 2</strong> is <code>nayan-media-downloaders</code> (routes through ymcdn.org). If Source 1 fails (e.g. YouTube bot detection on server IPs), Source 2 is tried automatically. If both fail, the API returns <code>\"mp4\": null, \"mp3\": null</code> rather than a 500 error — so your app never crashes, it simply handles null links.",
+    a: "TubeFetch uses a three-server fallback chain. <strong>Server 1</strong> is <code>btch-downloader</code> (primary; returns title + thumbnail). <strong>Server 2</strong> is <code>nayan-media-downloaders</code> (routes through ymcdn.org; fallback when Server 1 fails). <strong>Server 3</strong> is <code>youtubei.js</code> (YouTube's native client; tried last in auto mode; also returns a full quality list). If all three fail, the API returns <code>\"mp4\": null, \"mp3\": null</code> rather than a 500 error — your app never crashes, it simply handles null links. You can also target a specific server directly using <code>/api/v1/server=3/q?=…</code> (or v2).",
   },
   {
     q: "Can I download age-restricted or private videos?",
@@ -1615,12 +1629,12 @@ function buildHtml(version: string, baseUrl: string): string {
       <div class="ep-header" onclick="toggleEp(0)">
         <span class="ep-method">GET</span>
         <span class="ep-path">/api/v1/q?=(url or title)</span>
-        <span class="ep-desc-label">Full metadata + downloads</span>
+        <span class="ep-desc-label">Full metadata + downloads <span class="ep-badge-fast">auto</span></span>
         <span class="ep-chevron"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg></span>
       </div>
       <div class="ep-body">
         <div class="ep-body-inner">
-          <p class="ep-info">Pass any YouTube <code>URL</code> or plain search title. Returns full metadata — <code>title</code>, <code>author</code>, <code>thumbnail</code>, <code>duration</code>, <code>views</code>, <code>likes</code>, <code>description</code>, <code>keywords</code>, <code>category</code>, <code>short_url</code> — plus direct <code>MP4 HD</code> &amp; <code>MP3</code> download links. Response includes <code>video_id</code>, <code>url</code>, <code>short_url</code>, <code>cached</code>, <code>ApiCount</code>, and <code>ms</code>.</p>
+          <p class="ep-info">Pass any YouTube <code>URL</code> or plain search title. Returns full metadata — <code>title</code>, <code>author</code>, <code>thumbnail</code>, <code>duration</code>, <code>views</code>, <code>likes</code>, <code>description</code>, <code>keywords</code>, <code>category</code>, <code>short_url</code> — plus direct <code>MP4 HD</code> &amp; <code>MP3</code> download links. Response includes <code>video_id</code>, <code>url</code>, <code>short_url</code>, <code>media.server</code>, <code>cached</code>, <code>ApiCount</code>, and <code>ms</code>. Uses <strong>auto mode</strong> (tries Server 1 → 2 → 3 in order). Pin to a specific server with <code>/api/v1/server=1/q?=…</code>, <code>/api/v1/server=2/q?=…</code>, or <code>/api/v1/server=3/q?=…</code> — Server 3 also returns <code>media.qualities[]</code> with every available stream.</p>
           <div class="ep-input-row">
             <input class="ep-input" id="q0" type="text" placeholder="e.g. bohemian rhapsody  or  https://youtu.be/…" onkeydown="if(event.key==='Enter')fetchEp(0)" autocomplete="off"/>
             <button class="ep-fetch-btn ripple-container" id="btn0" onclick="addRipple(event);fetchEp(0)">
@@ -1697,12 +1711,12 @@ function buildHtml(version: string, baseUrl: string): string {
       <div class="ep-header" onclick="toggleEp(3)">
         <span class="ep-method v2">GET</span>
         <span class="ep-path">/api/v2/q?=(url or title)</span>
-        <span class="ep-desc-label">Fast — title + links <span class="ep-badge-fast">⚡ v2</span></span>
+        <span class="ep-desc-label">Fast — title + links <span class="ep-badge-fast">⚡ auto</span></span>
         <span class="ep-chevron"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg></span>
       </div>
       <div class="ep-body">
         <div class="ep-body-inner">
-          <p class="ep-info">The fastest download endpoint — returns the video <code>title</code> and direct <code>MP4</code> &amp; <code>MP3</code> download links with minimal overhead. For URL inputs, title and links are fetched in parallel. Response: <code>credit</code>, <code>version</code>, <code>title</code>, <code>media.mp4</code>, <code>media.mp3</code>, <code>ApiCount</code>, <code>cached</code>, <code>ms</code>.</p>
+          <p class="ep-info">The fastest download endpoint — returns the video <code>title</code> and direct <code>MP4</code> &amp; <code>MP3</code> download links with minimal overhead. Uses <strong>auto mode</strong> (tries Server 1 → 2 → 3 in order). Pin to a specific server with <code>/api/v2/server=1/q?=…</code>, <code>/api/v2/server=2/q?=…</code>, or <code>/api/v2/server=3/q?=…</code> — Server 3 also returns <code>media.qualities[]</code> with every available stream. Response: <code>credit</code>, <code>version</code>, <code>title</code>, <code>media.mp4</code>, <code>media.mp3</code>, <code>media.server</code>, <code>ApiCount</code>, <code>cached</code>, <code>ms</code>.</p>
           <div class="ep-input-row">
             <input class="ep-input" id="q3" type="text" placeholder="e.g. never gonna give you up  or  https://youtu.be/…" onkeydown="if(event.key==='Enter')fetchEp(3)" autocomplete="off"/>
             <button class="ep-fetch-btn ripple-container" id="btn3" onclick="addRipple(event);fetchEp(3)">
@@ -1876,7 +1890,7 @@ function buildHtml(version: string, baseUrl: string): string {
 
   <div class="card about reveal" id="about">
     <div class="card-title">About TubeFetch</div>
-    <p>Pass any YouTube URL or plain search title to <code>/api/v1/q</code> for full metadata or <code>/api/v2/q</code> for a faster response with the title, thumbnail, and download links. Use <code>/api/v3/q</code> to get a ranked list of 1–20 search results (default 10 — add <code>&amp;?=N</code> to control the count). Get direct <strong>MP4 HD</strong> and <strong>MP3</strong> URLs ready for bots, apps, or scripts. Results are cached for <strong>5 minutes</strong>. Every response includes a <strong>ms</strong> timing field and an <strong>ApiCount</strong> showing the total number of API calls served.</p>
+    <p>Pass any YouTube URL or plain search title to <code>/api/v1/q</code> for full metadata or <code>/api/v2/q</code> for a faster response with the title and download links. Both endpoints run in <strong>auto mode</strong> by default — trying Server 1 (btch-downloader), Server 2 (nayan), then Server 3 (youtubei.js) in order until one succeeds. Pin to a specific server with <code>/api/v1/server=3/q?=…</code> or <code>/api/v2/server=3/q?=…</code>. Server 3 returns a full <code>media.qualities[]</code> list with every available stream at every resolution. Use <code>/api/v3/q</code> to get a ranked list of 1–20 search results (default 10 — add <code>&amp;?=N</code> to control the count). Results are cached for <strong>5 minutes</strong>. Every response includes a <strong>ms</strong> timing field and an <strong>ApiCount</strong>.</p>
   </div>
 
   <div class="card disc reveal" id="disclaimer">
